@@ -1,8 +1,9 @@
-// index.js
+// index.js — versión actualizada con productos desde DB
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import { MercadoPagoConfig, Preference, Payment } from 'mercadopago';
+import { registerProductRoutes } from './routes/products.js';
 
 dotenv.config();
 
@@ -17,9 +18,10 @@ const app  = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
-app.use(cors({
-  origin: process.env.FRONTEND_URL,
-}));
+app.use(cors({ origin: process.env.FRONTEND_URL }));
+
+// ── Rutas de productos (Neon DB) ─────────────────────────────
+registerProductRoutes(app);
 
 // ── POST /api/checkout ───────────────────────────────────────
 app.post('/api/checkout', async (req, res) => {
@@ -32,15 +34,13 @@ app.post('/api/checkout', async (req, res) => {
   try {
     const body = {
       payer: {
-        email: email || undefined,
-        name:  shipping?.address?.nombre,
+        email:   email || undefined,
+        name:    shipping?.address?.nombre,
         surname: shipping?.address?.apellido,
-        phone: {
-          number: shipping?.address?.telefono,
-        },
+        phone:   { number: shipping?.address?.telefono },
         address: {
-          street_name:   shipping?.address?.calle,
-          zip_code:      shipping?.address?.cp,
+          street_name: shipping?.address?.calle,
+          zip_code:    shipping?.address?.cp,
         },
       },
 
@@ -54,33 +54,23 @@ app.post('/api/checkout', async (req, res) => {
         picture_url: item.image || undefined,
       })),
 
-      // Costo de envío como item adicional
-      ...(shipping?.cost > 0 ? {
-        // Agregamos el envío como item separado para que aparezca en MP
-      } : {}),
-
       back_urls: {
         success: `${process.env.FRONTEND_URL}/checkout/success`,
         failure: `${process.env.FRONTEND_URL}/checkout/failure`,
         pending: `${process.env.FRONTEND_URL}/checkout/pending`,
       },
-      // auto_return: 'approved', // descomentar en producción
 
       notification_url: `${process.env.BACKEND_URL}/api/webhook`,
+      payment_methods:  { installments: 3 },
 
-      payment_methods: {
-        installments: 3,
-      },
-
-      // Metadata para tu backend
       metadata: {
-        shipping_cost:     shipping?.cost,
-        shipping_carrier:  shipping?.name,
-        shipping_address:  shipping?.address,
+        shipping_cost:    shipping?.cost,
+        shipping_carrier: shipping?.name,
+        shipping_address: shipping?.address,
       },
     };
 
-    // Si hay costo de envío, lo sumamos como item
+    // Envío como ítem adicional
     if (shipping?.cost > 0) {
       body.items.push({
         id:          'shipping',
@@ -114,18 +104,14 @@ app.post('/api/webhook', async (req, res) => {
   if (type === 'payment') {
     try {
       const result = await payment.get({ id: data.id });
-      console.log(`[Webhook] Pago ${result.id} — Status: ${result.status}`);
-      console.log(`  Monto: $${result.transaction_amount} | Email: ${result.payer?.email}`);
+      console.log(`[Webhook] Pago ${result.id} — ${result.status} — $${result.transaction_amount}`);
     } catch (err) {
       console.error('[Webhook] Error:', err);
     }
   }
 });
 
-// ── GET /api/health ──────────────────────────────────────────
 app.get('/api/health', (_req, res) => res.json({ status: 'ok' }));
 app.get('/', (_req, res) => res.json({ status: 'ok' }));
 
-app.listen(PORT, () => {
-  console.log(`🚀 Servidor corriendo en http://localhost:${PORT}`);
-});
+app.listen(PORT, () => console.log(`🚀 Servidor en http://localhost:${PORT}`));
