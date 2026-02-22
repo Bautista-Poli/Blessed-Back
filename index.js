@@ -6,7 +6,6 @@ import { MercadoPagoConfig, Preference, Payment } from 'mercadopago';
 
 dotenv.config();
 
-// ── Mercado Pago client ──────────────────────────────────────
 const client = new MercadoPagoConfig({
   accessToken: process.env.MP_ACCESS_TOKEN,
 });
@@ -14,19 +13,17 @@ const client = new MercadoPagoConfig({
 const preference = new Preference(client);
 const payment    = new Payment(client);
 
-// ── Express app ──────────────────────────────────────────────
 const app  = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
 app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:4200',
+  origin: process.env.FRONTEND_URL,
 }));
 
 // ── POST /api/checkout ───────────────────────────────────────
-// Crea una preferencia de pago en Mercado Pago y devuelve la URL
 app.post('/api/checkout', async (req, res) => {
-  const { items } = req.body;
+  const { items, email, shipping } = req.body;
 
   if (!items || !Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ error: 'El carrito está vacío.' });
@@ -34,6 +31,19 @@ app.post('/api/checkout', async (req, res) => {
 
   try {
     const body = {
+      payer: {
+        email: email || undefined,
+        name:  shipping?.address?.nombre,
+        surname: shipping?.address?.apellido,
+        phone: {
+          number: shipping?.address?.telefono,
+        },
+        address: {
+          street_name:   shipping?.address?.calle,
+          zip_code:      shipping?.address?.cp,
+        },
+      },
+
       items: items.map(item => ({
         id:          item.id,
         title:       item.product,
@@ -44,29 +54,50 @@ app.post('/api/checkout', async (req, res) => {
         picture_url: item.image || undefined,
       })),
 
-      // URLs de retorno al sitio
+      // Costo de envío como item adicional
+      ...(shipping?.cost > 0 ? {
+        // Agregamos el envío como item separado para que aparezca en MP
+      } : {}),
+
       back_urls: {
         success: `${process.env.FRONTEND_URL}/checkout/success`,
         failure: `${process.env.FRONTEND_URL}/checkout/failure`,
         pending: `${process.env.FRONTEND_URL}/checkout/pending`,
       },
-      //auto_return: 'approved',
+      // auto_return: 'approved', // descomentar en producción
 
-      // Webhook para notificaciones (opcional pero recomendado)
       notification_url: `${process.env.BACKEND_URL}/api/webhook`,
 
-      // Cuotas sin interés (configurar en tu cuenta de MP)
       payment_methods: {
         installments: 3,
       },
+
+      // Metadata para tu backend
+      metadata: {
+        shipping_cost:     shipping?.cost,
+        shipping_carrier:  shipping?.name,
+        shipping_address:  shipping?.address,
+      },
     };
+
+    // Si hay costo de envío, lo sumamos como item
+    if (shipping?.cost > 0) {
+      body.items.push({
+        id:          'shipping',
+        title:       `Envío — ${shipping.name}`,
+        description: 'Costo de envío',
+        quantity:    1,
+        unit_price:  Number(shipping.cost),
+        currency_id: 'ARS',
+      });
+    }
 
     const result = await preference.create({ body });
 
     res.json({
-      init_point:    result.init_point,      // producción
-      sandbox_init_point: result.sandbox_init_point, // testing
-      preference_id: result.id,
+      init_point:         result.init_point,
+      sandbox_init_point: result.sandbox_init_point,
+      preference_id:      result.id,
     });
 
   } catch (err) {
@@ -75,44 +106,25 @@ app.post('/api/checkout', async (req, res) => {
   }
 });
 
-
 // ── POST /api/webhook ────────────────────────────────────────
-// Mercado Pago llama a este endpoint cuando cambia el estado de un pago.
-// Usalo para actualizar tu base de datos / confirmar pedidos.
 app.post('/api/webhook', async (req, res) => {
   const { type, data } = req.body;
-
-  // MP espera un 200 rápido, procesamos de forma async
   res.sendStatus(200);
 
   if (type === 'payment') {
     try {
       const result = await payment.get({ id: data.id });
-
-      const status      = result.status;        // approved | rejected | pending
-      const paymentId   = result.id;
-      const orderId     = result.order?.id;
-      const amount      = result.transaction_amount;
-      const payer       = result.payer?.email;
-
-      console.log(`[Webhook] Pago ${paymentId} — Status: ${status}`);
-      console.log(`  Orden: ${orderId} | Monto: $${amount} | Pagador: ${payer}`);
-
+      console.log(`[Webhook] Pago ${result.id} — Status: ${result.status}`);
+      console.log(`  Monto: $${result.transaction_amount} | Email: ${result.payer?.email}`);
     } catch (err) {
-      console.error('[Webhook] Error procesando pago:', err);
+      console.error('[Webhook] Error:', err);
     }
   }
 });
 
-
 // ── GET /api/health ──────────────────────────────────────────
-app.get('/api/health', (_req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
-});
-
-app.get('/', (_req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
-});
+app.get('/api/health', (_req, res) => res.json({ status: 'ok' }));
+app.get('/', (_req, res) => res.json({ status: 'ok' }));
 
 app.listen(PORT, () => {
   console.log(`🚀 Servidor corriendo en http://localhost:${PORT}`);
