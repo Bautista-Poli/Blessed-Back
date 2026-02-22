@@ -50,6 +50,7 @@ app.post('/api/checkout', async (req, res) => {
         failure: `${process.env.FRONTEND_URL}/checkout/failure`,
         pending: `${process.env.FRONTEND_URL}/checkout/pending`,
       },
+      //auto_return: 'approved',
 
       // Webhook para notificaciones (opcional pero recomendado)
       notification_url: `${process.env.BACKEND_URL}/api/webhook`,
