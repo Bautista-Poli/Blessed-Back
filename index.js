@@ -1,16 +1,15 @@
-// index.js — versión actualizada con productos desde DB
+// index.js
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import { MercadoPagoConfig, Preference, Payment } from 'mercadopago';
 import { registerProductRoutes } from './routes/products.js';
+import { registerDropRoutes }    from './routes/drops.js';
+import { registerAdminRoutes }   from './routes/admin.js';
 
 dotenv.config();
 
-const client = new MercadoPagoConfig({
-  accessToken: process.env.MP_ACCESS_TOKEN,
-});
-
+const client = new MercadoPagoConfig({ accessToken: process.env.MP_ACCESS_TOKEN });
 const preference = new Preference(client);
 const payment    = new Payment(client);
 
@@ -18,32 +17,27 @@ const app  = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
-app.use(cors({ origin: (origin, callback) => {
+app.use(cors({
+  origin: (origin, callback) => {
     const allowed = [
-      process.env.FRONTEND_URL,           // https://bblessedd.vercel.app
-      'http://localhost:4200',             // ng serve
-      'http://localhost:4201',             // por si usás otro puerto
+      process.env.FRONTEND_URL,
+      'http://localhost:4200',
+      'http://localhost:4201',
     ].filter(Boolean);
+    if (!origin || allowed.includes(origin)) callback(null, true);
+    else callback(new Error(`CORS bloqueado para: ${origin}`));
+  }
+}));
 
-    // Permite requests sin origin (Postman, curl, etc.)
-    if (!origin || allowed.includes(origin)) {
-      callback(null, true);
-    } else {
-      callback(new Error(`CORS bloqueado para: ${origin}`));
-    }
-  } 
- }));
-
-// ── Rutas de productos (Neon DB) ─────────────────────────────
+// ── Rutas ────────────────────────────────────────────────────
 registerProductRoutes(app);
+registerDropRoutes(app);
+registerAdminRoutes(app);
 
 // ── POST /api/checkout ───────────────────────────────────────
 app.post('/api/checkout', async (req, res) => {
   const { items, email, shipping } = req.body;
-
-  if (!items || !Array.isArray(items) || items.length === 0) {
-    return res.status(400).json({ error: 'El carrito está vacío.' });
-  }
+  if (!items?.length) return res.status(400).json({ error: 'El carrito está vacío.' });
 
   try {
     const body = {
@@ -52,12 +46,8 @@ app.post('/api/checkout', async (req, res) => {
         name:    shipping?.address?.nombre,
         surname: shipping?.address?.apellido,
         phone:   { number: shipping?.address?.telefono },
-        address: {
-          street_name: shipping?.address?.calle,
-          zip_code:    shipping?.address?.cp,
-        },
+        address: { street_name: shipping?.address?.calle, zip_code: shipping?.address?.cp },
       },
-
       items: items.map(item => ({
         id:          item.id,
         title:       item.product,
@@ -67,16 +57,13 @@ app.post('/api/checkout', async (req, res) => {
         currency_id: 'ARS',
         picture_url: item.image || undefined,
       })),
-
       back_urls: {
         success: `${process.env.FRONTEND_URL}/checkout/success`,
         failure: `${process.env.FRONTEND_URL}/checkout/failure`,
         pending: `${process.env.FRONTEND_URL}/checkout/pending`,
       },
-
       notification_url: `${process.env.BACKEND_URL}/api/webhook`,
       payment_methods:  { installments: 3 },
-
       metadata: {
         shipping_cost:    shipping?.cost,
         shipping_carrier: shipping?.name,
@@ -84,28 +71,22 @@ app.post('/api/checkout', async (req, res) => {
       },
     };
 
-    // Envío como ítem adicional
     if (shipping?.cost > 0) {
       body.items.push({
-        id:          'shipping',
-        title:       `Envío — ${shipping.name}`,
-        description: 'Costo de envío',
-        quantity:    1,
-        unit_price:  Number(shipping.cost),
-        currency_id: 'ARS',
+        id: 'shipping', title: `Envío — ${shipping.name}`,
+        description: 'Costo de envío', quantity: 1,
+        unit_price: Number(shipping.cost), currency_id: 'ARS',
       });
     }
 
     const result = await preference.create({ body });
-
     res.json({
       init_point:         result.init_point,
       sandbox_init_point: result.sandbox_init_point,
       preference_id:      result.id,
     });
-
   } catch (err) {
-    console.error('Error creando preferencia:', err);
+    console.error('Checkout error:', err);
     res.status(500).json({ error: 'No se pudo crear la preferencia de pago.' });
   }
 });
@@ -114,7 +95,6 @@ app.post('/api/checkout', async (req, res) => {
 app.post('/api/webhook', async (req, res) => {
   const { type, data } = req.body;
   res.sendStatus(200);
-
   if (type === 'payment') {
     try {
       const result = await payment.get({ id: data.id });
