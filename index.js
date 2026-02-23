@@ -18,7 +18,21 @@ const app  = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
-app.use(cors({ origin: process.env.FRONTEND_URL }));
+app.use(cors({ origin: (origin, callback) => {
+    const allowed = [
+      process.env.FRONTEND_URL,           // https://bblessedd.vercel.app
+      'http://localhost:4200',             // ng serve
+      'http://localhost:4201',             // por si usás otro puerto
+    ].filter(Boolean);
+
+    // Permite requests sin origin (Postman, curl, etc.)
+    if (!origin || allowed.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error(`CORS bloqueado para: ${origin}`));
+    }
+  } 
+ }));
 
 // ── Rutas de productos (Neon DB) ─────────────────────────────
 registerProductRoutes(app);
