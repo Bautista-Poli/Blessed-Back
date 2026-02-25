@@ -11,6 +11,7 @@ cloudinary.config({
 });
 
 export function registerUploadRoutes(app) {
+  app.get('/api/uploads/', (_req, res) => res.json({ status: 'ok' }));
 
   // POST /api/uploads/product
   app.post('/api/uploads/product', upload.single('file'), async (req, res) => {
