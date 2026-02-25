@@ -6,7 +6,7 @@ import { MercadoPagoConfig, Preference, Payment } from 'mercadopago';
 import { registerProductRoutes } from './routes/products.js';
 import { registerDropRoutes }    from './routes/drops.js';
 import { registerAdminRoutes }   from './routes/admin.js';
-import { registerUploadRoutes }   from './routes/admin.js';
+import { registerUploadRoutes }   from './routes/imageUpload.js';
 
 dotenv.config();
 
