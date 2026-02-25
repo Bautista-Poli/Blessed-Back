@@ -6,6 +6,7 @@ import { MercadoPagoConfig, Preference, Payment } from 'mercadopago';
 import { registerProductRoutes } from './routes/products.js';
 import { registerDropRoutes }    from './routes/drops.js';
 import { registerAdminRoutes }   from './routes/admin.js';
+import { registerUploadRoutes }   from './routes/admin.js';
 
 dotenv.config();
 
@@ -33,6 +34,7 @@ app.use(cors({
 registerProductRoutes(app);
 registerDropRoutes(app);
 registerAdminRoutes(app);
+registerUploadRoutes(app);
 
 // ── POST /api/checkout ───────────────────────────────────────
 app.post('/api/checkout', async (req, res) => {
