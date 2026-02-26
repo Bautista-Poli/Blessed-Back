@@ -62,12 +62,22 @@ export function registerStockRoutes(app) {
     }
 
     try {
-      await pool.query(`
-        INSERT INTO product_stock (product_id, size, color, stock)
-        VALUES ($1, $2, $3, $4)
-        ON CONFLICT (product_id, size, color)
-          DO UPDATE SET stock = EXCLUDED.stock
+      // ON CONFLICT no matchea NULLs en Postgres (NULL != NULL),
+      // así que hacemos upsert manual: UPDATE primero, INSERT si no existía.
+      const { rowCount } = await pool.query(`
+        UPDATE product_stock
+        SET stock = $4
+        WHERE product_id = $1
+          AND size        = $2
+          AND (color = $3 OR ($3 IS NULL AND color IS NULL))
       `, [productId, size, color, quantity]);
+
+      if (rowCount === 0) {
+        await pool.query(`
+          INSERT INTO product_stock (product_id, size, color, stock)
+          VALUES ($1, $2, $3, $4)
+        `, [productId, size, color, quantity]);
+      }
 
       const product = await getFullProduct(productId);
       if (!product) return res.status(404).json({ error: 'Producto no encontrado.' });
@@ -120,10 +130,6 @@ export function registerStockRoutes(app) {
 
 // ── Helpers ────────────────────────────────────────────────────
 
-/**
- * Devuelve el producto completo (mismo shape que GET /api/products/:id)
- * para que el frontend pueda sincronizar su BehaviorSubject directamente.
- */
 async function getFullProduct(productId) {
   const { rows } = await pool.query(`
     SELECT
@@ -149,10 +155,6 @@ async function getFullProduct(productId) {
   return rows[0] ?? null;
 }
 
-/**
- * Descuenta stock cuando MercadoPago confirma un pago aprobado.
- * Exportada para uso en el webhook de index.js.
- */
 export async function decrementStock(productId, size, quantity = 1, color = null) {
   await pool.query(`
     UPDATE product_stock
