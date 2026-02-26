@@ -4,7 +4,6 @@ import { pool } from './products.js';
 export function registerStockRoutes(app) {
 
   // ── GET /api/stock ─────────────────────────────────────────
-  // Devuelve todos los productos activos con su stock por talla/color
   app.get('/api/stock', async (_req, res) => {
     try {
       const { rows } = await pool.query(`
@@ -19,8 +18,7 @@ export function registerStockRoutes(app) {
                 'quantity',  ps.stock,
                 'reserved',  0,
                 'available', ps.stock
-              )
-              ORDER BY ps.size
+              ) ORDER BY ps.size
             ) FILTER (WHERE ps.size IS NOT NULL),
             '[]'
           ) AS sizes,
@@ -40,36 +38,18 @@ export function registerStockRoutes(app) {
 
   // ── GET /api/stock/:productId ──────────────────────────────
   app.get('/api/stock/:productId', async (req, res) => {
-    const { productId } = req.params;
     try {
-      const { rows: product } = await pool.query(
-        'SELECT id, name FROM products WHERE id = $1 AND active = true',
-        [productId]
-      );
-      if (!product.length) return res.status(404).json({ error: 'Producto no encontrado.' });
-
-      const { rows: sizes } = await pool.query(`
-        SELECT size, color, stock AS quantity, 0 AS reserved, stock AS available
-        FROM product_stock
-        WHERE product_id = $1
-        ORDER BY size
-      `, [productId]);
-
-      res.json({
-        productId:      product[0].id,
-        productName:    product[0].name,
-        sizes,
-        totalAvailable: sizes.reduce((acc, s) => acc + s.quantity, 0),
-      });
+      const result = await getFullProduct(req.params.productId);
+      if (!result) return res.status(404).json({ error: 'Producto no encontrado.' });
+      res.json(result);
     } catch (err) {
-      console.error(`[Stock] GET /api/stock/${productId} error:`, err);
+      console.error(`[Stock] GET /api/stock/${req.params.productId} error:`, err);
       res.status(500).json({ error: 'Error obteniendo el stock.' });
     }
   });
 
   // ── PATCH /api/stock/:productId ────────────────────────────
-  // Actualiza el stock de UNA talla (y opcionalmente color)
-  // Body: { size: string, quantity: number, color?: string }
+  // Body: { size: string, quantity: number, color?: string|null }
   app.patch('/api/stock/:productId', async (req, res) => {
     const { productId } = req.params;
     const { size, quantity, color = null } = req.body;
@@ -82,7 +62,6 @@ export function registerStockRoutes(app) {
     }
 
     try {
-      // Upsert: si no existe la fila la crea, si existe la actualiza
       await pool.query(`
         INSERT INTO product_stock (product_id, size, color, stock)
         VALUES ($1, $2, $3, $4)
@@ -90,7 +69,9 @@ export function registerStockRoutes(app) {
           DO UPDATE SET stock = EXCLUDED.stock
       `, [productId, size, color, quantity]);
 
-      return getProductStock(res, productId);
+      const product = await getFullProduct(productId);
+      if (!product) return res.status(404).json({ error: 'Producto no encontrado.' });
+      res.json(product);
     } catch (err) {
       console.error(`[Stock] PATCH /api/stock/${productId} error:`, err);
       res.status(500).json({ error: 'Error actualizando el stock.' });
@@ -98,7 +79,6 @@ export function registerStockRoutes(app) {
   });
 
   // ── PUT /api/stock/:productId ──────────────────────────────
-  // Reemplaza el stock completo de un producto (todas las tallas)
   // Body: { sizes: [{ size, quantity, color? }] }
   app.put('/api/stock/:productId', async (req, res) => {
     const { productId } = req.params;
@@ -124,7 +104,10 @@ export function registerStockRoutes(app) {
         );
       }
       await client.query('COMMIT');
-      return getProductStock(res, productId);
+
+      const product = await getFullProduct(productId);
+      if (!product) return res.status(404).json({ error: 'Producto no encontrado.' });
+      res.json(product);
     } catch (err) {
       await client.query('ROLLBACK');
       console.error(`[Stock] PUT /api/stock/${productId} error:`, err);
@@ -135,32 +118,41 @@ export function registerStockRoutes(app) {
   });
 }
 
-// ── Helper compartido ──────────────────────────────────────────
-async function getProductStock(res, productId) {
-  const { rows: product } = await pool.query(
-    'SELECT id, name FROM products WHERE id = $1',
-    [productId]
-  );
-  if (!product.length) return res.status(404).json({ error: 'Producto no encontrado.' });
+// ── Helpers ────────────────────────────────────────────────────
 
-  const { rows: sizes } = await pool.query(`
-    SELECT size, color, stock AS quantity, 0 AS reserved, stock AS available
-    FROM product_stock
-    WHERE product_id = $1
-    ORDER BY size
+/**
+ * Devuelve el producto completo (mismo shape que GET /api/products/:id)
+ * para que el frontend pueda sincronizar su BehaviorSubject directamente.
+ */
+async function getFullProduct(productId) {
+  const { rows } = await pool.query(`
+    SELECT
+      p.id, p.name, p.cat, p.drop, p.price, p.description, p.images,
+      p.original_price AS "originalPrice",
+      p.is_new         AS "isNew",
+      p.is_sale        AS "isSale",
+      COALESCE(
+        json_agg(DISTINCT jsonb_build_object('name', pc.name, 'hex', pc.hex))
+        FILTER (WHERE pc.name IS NOT NULL), '[]'
+      ) AS colors,
+      COALESCE(
+        json_agg(DISTINCT jsonb_build_object('size', ps.size, 'color', ps.color, 'stock', ps.stock))
+        FILTER (WHERE ps.size IS NOT NULL), '[]'
+      ) AS stock
+    FROM products p
+    LEFT JOIN product_colors pc ON pc.product_id = p.id
+    LEFT JOIN product_stock  ps ON ps.product_id  = p.id
+    WHERE p.id = $1
+    GROUP BY p.id
   `, [productId]);
 
-  return res.json({
-    productId:      product[0].id,
-    productName:    product[0].name,
-    sizes,
-    totalAvailable: sizes.reduce((acc, s) => acc + s.quantity, 0),
-  });
+  return rows[0] ?? null;
 }
 
-// ── Utilidad interna para el webhook ──────────────────────────
-// Descuenta stock cuando MercadoPago confirma un pago aprobado.
-// Uso: await decrementStock(productId, size, quantity, color?)
+/**
+ * Descuenta stock cuando MercadoPago confirma un pago aprobado.
+ * Exportada para uso en el webhook de index.js.
+ */
 export async function decrementStock(productId, size, quantity = 1, color = null) {
   await pool.query(`
     UPDATE product_stock
