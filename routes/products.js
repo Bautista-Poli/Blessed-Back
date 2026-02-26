@@ -116,7 +116,7 @@ export function registerProductRoutes(app) {
         Number(price),
         Number(originalPrice ?? price),
         !!isNew, !!isSale,
-        JSON.stringify(images ?? []),
+        images ?? [],
         description || null,
       ]);
 
