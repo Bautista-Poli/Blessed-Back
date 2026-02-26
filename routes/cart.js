@@ -1,6 +1,6 @@
+// routes/cart.js
 import { MercadoPagoConfig, Preference, Payment } from 'mercadopago';
-import { decrementStock } from './stock.js';
-import { db } from '../firebase.js';
+import { decrementStock } from './stock.js'; // Importamos la función que usa PG
 
 export const registerCartRoutes = (app) => {
   const client = new MercadoPagoConfig({ accessToken: process.env.MP_ACCESS_TOKEN });
@@ -38,10 +38,9 @@ export const registerCartRoutes = (app) => {
         notification_url: `${process.env.BACKEND_URL}/api/webhook`,
         payment_methods: { installments: 3 },
         metadata: {
+          // Importante: guardamos ID y SIZE para identificar la fila exacta en PG
           cart_items: items.map(i => ({ id: i.id, size: i.size, quantity: i.quantity })),
           shipping_cost: shipping?.cost,
-          shipping_carrier: shipping?.name,
-          shipping_address: shipping?.address,
         },
       };
 
@@ -56,37 +55,37 @@ export const registerCartRoutes = (app) => {
       const result = await preference.create({ body });
       res.json({
         init_point: result.init_point,
-        sandbox_init_point: result.sandbox_init_point,
         preference_id: result.id,
       });
     } catch (err) {
       console.error('Checkout error:', err);
-      res.status(500).json({ error: 'No se pudo crear la preferencia de pago.' });
+      res.status(500).json({ error: 'No se pudo crear la preferencia.' });
     }
   });
 
   // ── POST /api/webhook ────────────────────────────────────────
   app.post('/api/webhook', async (req, res) => {
     const { type, data } = req.body;
-    res.sendStatus(200);
+    res.sendStatus(200); // Responder rápido a MP
 
     if (type === 'payment') {
       try {
         const result = await payment.get({ id: data.id });
-        console.log(`[Webhook] Pago ${result.id} — ${result.status}`);
-
+        
         if (result.status === 'approved') {
           const cartItems = result.metadata?.cart_items ?? [];
+
+          // Ejecutamos los updates en la base de datos PostgreSQL
           await Promise.allSettled(
             cartItems.map(item =>
-              decrementStock(db, item.id, item.size, Number(item.quantity))
-                .then(() => console.log(`[Stock] -${item.quantity} × ${item.id}`))
-                .catch(err => console.error(`[Stock] Error:`, err))
+              decrementStock(item.id, item.size, Number(item.quantity))
+                .then(() => console.log(`[Stock PG] Descontado: ${item.quantity} de ${item.id} (${item.size})`))
+                .catch(err => console.error(`[Stock PG] Error en ${item.id}:`, err.message))
             )
           );
         }
       } catch (err) {
-        console.error('[Webhook] Error:', err);
+        console.error('[Webhook Error]:', err);
       }
     }
   });

@@ -1,110 +1,105 @@
 // routes/stock.js
-import { db } from '../firebase.js'; // ajustá el path según tu proyecto
-
-// ── Helpers ──────────────────────────────────────────────────
-
-/**
- * Convierte un doc de Firestore en el shape ProductStock que espera el frontend.
- * Estructura en Firestore:
- *   stock/{productId}  →  { productName: string, sizes: { [size]: { quantity, reserved } } }
- */
-function docToProductStock(id, data) {
-  const sizesMap = data.sizes ?? {};
-  const sizes = Object.entries(sizesMap).map(([size, s]) => {
-    const quantity = s.quantity  ?? 0;
-    const reserved = s.reserved ?? 0;
-    return {
-      size,
-      quantity,
-      reserved,
-      available: Math.max(0, quantity - reserved),
-    };
-  });
-
-  // Ordenar tallas: numérico primero (34,36…), luego texto (XS,S,M,L,XL,XXL), luego resto
-  sizes.sort((a, b) => {
-    const numA = Number(a.size), numB = Number(b.size);
-    const sizeOrder = ['XS','S','M','L','XL','XXL','XXXL'];
-    if (!isNaN(numA) && !isNaN(numB)) return numA - numB;
-    if (!isNaN(numA)) return -1;
-    if (!isNaN(numB)) return  1;
-    const iA = sizeOrder.indexOf(a.size.toUpperCase());
-    const iB = sizeOrder.indexOf(b.size.toUpperCase());
-    if (iA !== -1 && iB !== -1) return iA - iB;
-    if (iA !== -1) return -1;
-    if (iB !== -1) return  1;
-    return a.size.localeCompare(b.size);
-  });
-
-  const totalAvailable = sizes.reduce((acc, s) => acc + s.available, 0);
-
-  return {
-    productId:      id,
-    productName:    data.productName ?? '',
-    sizes,
-    totalAvailable,
-  };
-}
-
-// ── Rutas ─────────────────────────────────────────────────────
+import { pool } from './products.js';
 
 export function registerStockRoutes(app) {
 
-  // GET /api/stock  →  todos los productos con su stock
+  // ── GET /api/stock ─────────────────────────────────────────
+  // Devuelve todos los productos activos con su stock por talla/color
   app.get('/api/stock', async (_req, res) => {
     try {
-      const snap = await db.collection('stock').get();
-      const stock = snap.docs.map(doc => docToProductStock(doc.id, doc.data()));
-      res.json(stock);
+      const { rows } = await pool.query(`
+        SELECT
+          p.id          AS "productId",
+          p.name        AS "productName",
+          COALESCE(
+            json_agg(
+              jsonb_build_object(
+                'size',      ps.size,
+                'color',     ps.color,
+                'quantity',  ps.stock,
+                'reserved',  0,
+                'available', ps.stock
+              )
+              ORDER BY ps.size
+            ) FILTER (WHERE ps.size IS NOT NULL),
+            '[]'
+          ) AS sizes,
+          COALESCE(SUM(ps.stock), 0) AS "totalAvailable"
+        FROM products p
+        LEFT JOIN product_stock ps ON ps.product_id = p.id
+        WHERE p.active = true
+        GROUP BY p.id
+        ORDER BY p.name ASC
+      `);
+      res.json(rows);
     } catch (err) {
       console.error('[Stock] GET /api/stock error:', err);
       res.status(500).json({ error: 'Error obteniendo el stock.' });
     }
   });
 
-  // GET /api/stock/:productId  →  stock de un producto
+  // ── GET /api/stock/:productId ──────────────────────────────
   app.get('/api/stock/:productId', async (req, res) => {
     const { productId } = req.params;
     try {
-      const doc = await db.collection('stock').doc(productId).get();
-      if (!doc.exists) return res.status(404).json({ error: 'Producto no encontrado en stock.' });
-      res.json(docToProductStock(doc.id, doc.data()));
+      const { rows: product } = await pool.query(
+        'SELECT id, name FROM products WHERE id = $1 AND active = true',
+        [productId]
+      );
+      if (!product.length) return res.status(404).json({ error: 'Producto no encontrado.' });
+
+      const { rows: sizes } = await pool.query(`
+        SELECT size, color, stock AS quantity, 0 AS reserved, stock AS available
+        FROM product_stock
+        WHERE product_id = $1
+        ORDER BY size
+      `, [productId]);
+
+      res.json({
+        productId:      product[0].id,
+        productName:    product[0].name,
+        sizes,
+        totalAvailable: sizes.reduce((acc, s) => acc + s.quantity, 0),
+      });
     } catch (err) {
       console.error(`[Stock] GET /api/stock/${productId} error:`, err);
       res.status(500).json({ error: 'Error obteniendo el stock.' });
     }
   });
 
+  // ── PATCH /api/stock/:productId ────────────────────────────
+  // Actualiza el stock de UNA talla (y opcionalmente color)
+  // Body: { size: string, quantity: number, color?: string }
   app.patch('/api/stock/:productId', async (req, res) => {
     const { productId } = req.params;
-    const { size, quantity } = req.body;
+    const { size, quantity, color = null } = req.body;
 
     if (!size || quantity === undefined || quantity === null) {
       return res.status(400).json({ error: 'Se requieren "size" y "quantity".' });
     }
-    if (typeof quantity !== 'number' || quantity < 0 || !Number.isInteger(quantity)) {
-      return res.status(400).json({ error: '"quantity" debe ser un entero ≥ 0.' });
+    if (!Number.isInteger(quantity) || quantity < 0) {
+      return res.status(400).json({ error: '"quantity" debe ser un entero >= 0.' });
     }
 
     try {
-      const ref = db.collection('stock').doc(productId);
-      const doc = await ref.get();
+      // Upsert: si no existe la fila la crea, si existe la actualiza
+      await pool.query(`
+        INSERT INTO product_stock (product_id, size, color, stock)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (product_id, size, color)
+          DO UPDATE SET stock = EXCLUDED.stock
+      `, [productId, size, color, quantity]);
 
-      if (!doc.exists) return res.status(404).json({ error: 'Producto no encontrado en stock.' });
-
-      // Actualiza sólo el campo de esa talla usando dot-notation de Firestore
-      await ref.update({ [`sizes.${size}.quantity`]: quantity });
-
-      const updated = await ref.get();
-      res.json(docToProductStock(updated.id, updated.data()));
+      return getProductStock(res, productId);
     } catch (err) {
       console.error(`[Stock] PATCH /api/stock/${productId} error:`, err);
       res.status(500).json({ error: 'Error actualizando el stock.' });
     }
   });
 
-  // PUT /api/stock/:productId  →  reemplaza el stock completo de un producto
-  // Body: { sizes: [{ size: string, quantity: number }] }
+  // ── PUT /api/stock/:productId ──────────────────────────────
+  // Reemplaza el stock completo de un producto (todas las tallas)
+  // Body: { sizes: [{ size, quantity, color? }] }
   app.put('/api/stock/:productId', async (req, res) => {
     const { productId } = req.params;
     const { sizes } = req.body;
@@ -113,50 +108,65 @@ export function registerStockRoutes(app) {
       return res.status(400).json({ error: '"sizes" debe ser un array no vacío.' });
     }
     for (const s of sizes) {
-      if (!s.size || typeof s.quantity !== 'number' || s.quantity < 0 || !Number.isInteger(s.quantity)) {
-        return res.status(400).json({ error: 'Cada talla requiere "size" (string) y "quantity" (entero ≥ 0).' });
+      if (!s.size || !Number.isInteger(s.quantity) || s.quantity < 0) {
+        return res.status(400).json({ error: 'Cada talla requiere "size" y "quantity" (entero >= 0).' });
       }
     }
 
+    const client = await pool.connect();
     try {
-      const ref = db.collection('stock').doc(productId);
-      const doc = await ref.get();
-
-      if (!doc.exists) return res.status(404).json({ error: 'Producto no encontrado en stock.' });
-
-      // Reconstruir el mapa de tallas preservando los "reserved" existentes
-      const existing = doc.data().sizes ?? {};
-      const newSizes = {};
-      for (const { size, quantity } of sizes) {
-        newSizes[size] = {
-          quantity,
-          reserved: existing[size]?.reserved ?? 0,
-        };
+      await client.query('BEGIN');
+      await client.query('DELETE FROM product_stock WHERE product_id = $1', [productId]);
+      for (const { size, quantity, color = null } of sizes) {
+        await client.query(
+          'INSERT INTO product_stock (product_id, size, color, stock) VALUES ($1, $2, $3, $4)',
+          [productId, size, color, quantity]
+        );
       }
-
-      await ref.update({ sizes: newSizes });
-
-      const updated = await ref.get();
-      res.json(docToProductStock(updated.id, updated.data()));
+      await client.query('COMMIT');
+      return getProductStock(res, productId);
     } catch (err) {
+      await client.query('ROLLBACK');
       console.error(`[Stock] PUT /api/stock/${productId} error:`, err);
       res.status(500).json({ error: 'Error actualizando el stock.' });
+    } finally {
+      client.release();
     }
   });
-
-  // ── Utilidad interna (no expuesta al frontend) ──────────────
-  // Llamá esta función desde el webhook de MercadoPago para descontar
-  // unidades cuando un pago se aprueba.
-  //
-  // decrementStock(productId, size, quantity)  →  Promise<void>
 }
 
-export async function decrementStock(db, productId, size, quantity = 1) {
-  const ref = db.collection('stock').doc(productId);
-  const doc = await ref.get();
-  if (!doc.exists) throw new Error(`Stock doc not found for product ${productId}`);
+// ── Helper compartido ──────────────────────────────────────────
+async function getProductStock(res, productId) {
+  const { rows: product } = await pool.query(
+    'SELECT id, name FROM products WHERE id = $1',
+    [productId]
+  );
+  if (!product.length) return res.status(404).json({ error: 'Producto no encontrado.' });
 
-  const current = doc.data().sizes?.[size]?.quantity ?? 0;
-  const next    = Math.max(0, current - quantity);
-  await ref.update({ [`sizes.${size}.quantity`]: next });
+  const { rows: sizes } = await pool.query(`
+    SELECT size, color, stock AS quantity, 0 AS reserved, stock AS available
+    FROM product_stock
+    WHERE product_id = $1
+    ORDER BY size
+  `, [productId]);
+
+  return res.json({
+    productId:      product[0].id,
+    productName:    product[0].name,
+    sizes,
+    totalAvailable: sizes.reduce((acc, s) => acc + s.quantity, 0),
+  });
+}
+
+// ── Utilidad interna para el webhook ──────────────────────────
+// Descuenta stock cuando MercadoPago confirma un pago aprobado.
+// Uso: await decrementStock(productId, size, quantity, color?)
+export async function decrementStock(productId, size, quantity = 1, color = null) {
+  await pool.query(`
+    UPDATE product_stock
+    SET stock = GREATEST(0, stock - $1)
+    WHERE product_id = $2
+      AND size = $3
+      AND (color = $4 OR ($4 IS NULL AND color IS NULL))
+  `, [quantity, productId, size, color]);
 }
